@@ -1,0 +1,48 @@
+# Give all tests:
+# - access to loopback and a hosts file
+# - tmp mounted at /tmp
+# - a /dev/null device
+# - run as non-root user
+[[directives]]
+network = "loopback"
+added_layers = [
+    { stubs = ["/tmp/", "/dev/null"] },
+    { paths = ["/etc/hosts"] }
+]
+mounts = [
+    { type = "tmp", mount_point = "/tmp" },
+    { type = "devices", devices = ["null"] },
+]
+user = 1000
+group = 1000
+
+# Test tests need access to standard UNIX commands
+[[directives]]
+filter = """
+package.equals(tokio) && (
+    test.equals(process_arg0) ||
+    (test.equals(net_unix_pipe) && name.equals(anon_pipe_spawn_echo)) ||
+    name.starts_with(process::imp::pidfd_reaper) ||
+    test.equals(process_issue_2174) ||
+    test.equals(process_change_of_runtime) ||
+    test.equals(process_smoke))"""
+image.name = "docker://archlinux"
+added_layers = [
+    { stubs = ["/tmp/", "/dev/null"] }
+]
+
+# This test reads up the tokio/Cargo.toml file, so we need to include it
+[[directives]]
+filter = """
+package.equals(tokio) &&
+test.equals(rt_handle_block_on) &&
+name.ends_with(::basic_fs)"""
+added_layers = [
+    { paths = ["tokio/Cargo.toml"], strip_prefix = "tokio/" }
+]
+
+# This test runs cargo recursively and uses a lot of things on the system that makes it difficult to
+# containerize.
+[[directives]]
+filter = "package.equals(tests-build)"
+ignore = true
