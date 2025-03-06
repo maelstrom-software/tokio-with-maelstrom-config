@@ -5,6 +5,12 @@ cfg_io_driver! {
 #[cfg(feature = "rt")]
 pub(crate) mod atomic_cell;
 
+#[cfg(feature = "net")]
+mod blocking_check;
+#[cfg(feature = "net")]
+#[allow(unused_imports)]
+pub(crate) use blocking_check::check_socket_for_blocking;
+
 pub(crate) mod metric_atomics;
 
 #[cfg(any(feature = "rt", feature = "signal", feature = "process"))]
@@ -86,3 +92,7 @@ pub(crate) mod memchr;
 pub(crate) mod markers;
 
 pub(crate) mod cacheline;
+
+cfg_io_driver_impl! {
+    pub(crate) mod ptr_expose;
+}

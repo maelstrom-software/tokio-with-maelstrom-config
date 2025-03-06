@@ -1,18 +1,19 @@
 cfg_not_wasi! {
-    use crate::future::poll_fn;
     use crate::net::{to_socket_addrs, ToSocketAddrs};
+    use std::future::poll_fn;
     use std::time::Duration;
 }
 
 use crate::io::{AsyncRead, AsyncWrite, Interest, PollEvented, ReadBuf, Ready};
 use crate::net::tcp::split::{split, ReadHalf, WriteHalf};
 use crate::net::tcp::split_owned::{split_owned, OwnedReadHalf, OwnedWriteHalf};
+use crate::util::check_socket_for_blocking;
 
 use std::fmt;
 use std::io;
 use std::net::{Shutdown, SocketAddr};
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 
 cfg_io_util! {
     use bytes::BufMut;
@@ -173,6 +174,10 @@ impl TcpStream {
     /// will block the thread, which will cause unexpected behavior.
     /// Non-blocking mode can be set using [`set_nonblocking`].
     ///
+    /// Passing a listener in blocking mode is always erroneous,
+    /// and the behavior in that case may change in the future.
+    /// For example, it could panic.
+    ///
     /// [`set_nonblocking`]: std::net::TcpStream::set_nonblocking
     ///
     /// # Examples
@@ -200,6 +205,8 @@ impl TcpStream {
     /// explicitly with [`Runtime::enter`](crate::runtime::Runtime::enter) function.
     #[track_caller]
     pub fn from_std(stream: std::net::TcpStream) -> io::Result<TcpStream> {
+        check_socket_for_blocking(&stream)?;
+
         let io = mio::net::TcpStream::from_std(stream);
         let io = PollEvented::new(io)?;
         Ok(TcpStream { io })
@@ -213,6 +220,7 @@ impl TcpStream {
     /// # Examples
     ///
     /// ```
+    /// # if cfg!(miri) { return } // No `socket` in miri.
     /// use std::error::Error;
     /// use std::io::Read;
     /// use tokio::net::TcpListener;
@@ -340,7 +348,7 @@ impl TcpStream {
     /// use tokio::io::{self, ReadBuf};
     /// use tokio::net::TcpStream;
     ///
-    /// use futures::future::poll_fn;
+    /// use std::future::poll_fn;
     ///
     /// #[tokio::main]
     /// async fn main() -> io::Result<()> {
@@ -919,7 +927,7 @@ impl TcpStream {
     /// were written.
     ///
     /// Data is written from each buffer in order, with the final buffer read
-    /// from possible being only partially consumed. This method behaves
+    /// from possibly being only partially consumed. This method behaves
     /// equivalently to a single call to [`try_write()`] with concatenated
     /// buffers.
     ///
@@ -1278,7 +1286,7 @@ impl TcpStream {
 
     // == Poll IO functions that takes `&self` ==
     //
-    // To read or write without mutable access to the `UnixStream`, combine the
+    // To read or write without mutable access to the `TcpStream`, combine the
     // `poll_read_ready` or `poll_write_ready` methods with the `try_read` or
     // `try_write` methods.
 

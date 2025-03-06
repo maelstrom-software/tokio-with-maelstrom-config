@@ -250,8 +250,7 @@ use std::io;
 use std::path::Path;
 use std::pin::Pin;
 use std::process::{Command as StdCommand, ExitStatus, Output, Stdio};
-use std::task::Context;
-use std::task::Poll;
+use std::task::{ready, Context, Poll};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -329,6 +328,15 @@ impl Command {
     /// standard library is expected.
     pub fn as_std_mut(&mut self) -> &mut StdCommand {
         &mut self.std
+    }
+
+    /// Cheaply convert into a `std::process::Command`.
+    ///
+    /// Note that Tokio specific options will be lost. Currently, this only applies to [`kill_on_drop`].
+    ///
+    /// [`kill_on_drop`]: Command::kill_on_drop
+    pub fn into_std(self) -> StdCommand {
+        self.std
     }
 
     /// Adds an argument to pass to the program.
@@ -802,6 +810,7 @@ impl Command {
     /// Basic usage:
     ///
     /// ```no_run
+    /// # if cfg!(miri) { return } // No `pidfd_spawnp` in miri.
     /// use tokio::process::Command;
     ///
     /// async fn run_ls() -> std::process::ExitStatus {
@@ -972,6 +981,26 @@ impl Command {
 
         async { child?.wait_with_output().await }
     }
+
+    /// Returns the boolean value that was previously set by [`Command::kill_on_drop`].
+    ///
+    /// Note that if you have not previously called [`Command::kill_on_drop`], the
+    /// default value of `false` will be returned here.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tokio::process::Command;
+    ///
+    /// let mut cmd = Command::new("echo");
+    /// assert!(!cmd.get_kill_on_drop());
+    ///
+    /// cmd.kill_on_drop(true);
+    /// assert!(cmd.get_kill_on_drop());
+    /// ```
+    pub fn get_kill_on_drop(&self) -> bool {
+        self.kill_on_drop
+    }
 }
 
 impl From<StdCommand> for Command {
@@ -1019,7 +1048,7 @@ where
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         ready!(crate::trace::trace_leaf(cx));
         // Keep track of task budget
-        let coop = ready!(crate::runtime::coop::poll_proceed(cx));
+        let coop = ready!(crate::task::coop::poll_proceed(cx));
 
         let ret = Pin::new(&mut self.inner).poll(cx);
 
@@ -1129,16 +1158,20 @@ impl Child {
     pub fn start_kill(&mut self) -> io::Result<()> {
         match &mut self.child {
             FusedChild::Child(child) => child.kill(),
-            FusedChild::Done(_) => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid argument: can't kill an exited process",
-            )),
+            FusedChild::Done(_) => Ok(()),
         }
     }
 
     /// Forces the child to exit.
     ///
-    /// This is equivalent to sending a `SIGKILL` on unix platforms.
+    /// This is equivalent to sending a `SIGKILL` on unix platforms
+    /// followed by [`wait`](Child::wait).
+    ///
+    /// Note: std version of [`Child::kill`](std::process::Child::kill) does not `wait`.
+    /// For an equivalent of `Child::kill` in the standard library,
+    /// use [`start_kill`](Child::start_kill).
+    ///
+    /// # Examples
     ///
     /// If the child has to be killed remotely, it is possible to do it using
     /// a combination of the select! macro and a `oneshot` channel. In the following
@@ -1159,6 +1192,46 @@ impl Child {
     ///         _ = child.wait() => {}
     ///         _ = recv => child.kill().await.expect("kill failed"),
     ///     }
+    /// }
+    /// ```
+    ///
+    /// You can also interact with the child's standard I/O. For example, you can
+    /// read its stdout while waiting for it to exit.
+    ///
+    /// ```no_run
+    /// # use std::process::Stdio;
+    /// #
+    /// # use tokio::io::AsyncReadExt;
+    /// # use tokio::process::Command;
+    /// # use tokio::sync::oneshot::channel;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let (_tx, rx) = channel::<()>();
+    ///
+    ///     let mut child = Command::new("echo")
+    ///         .arg("Hello World!")
+    ///         .stdout(Stdio::piped())
+    ///         .spawn()
+    ///         .unwrap();
+    ///
+    ///     let mut stdout = child.stdout.take().expect("stdout is not captured");
+    ///
+    ///     let read_stdout = tokio::spawn(async move {
+    ///         let mut buff = Vec::new();
+    ///         let _ = stdout.read_to_end(&mut buff).await;
+    ///
+    ///         buff
+    ///     });
+    ///
+    ///     tokio::select! {
+    ///         _ = child.wait() => {}
+    ///         _ = rx => { child.kill().await.expect("kill failed") },
+    ///     }
+    ///
+    ///     let buff = read_stdout.await.unwrap();
+    ///
+    ///     assert_eq!(buff, b"Hello World!\n");
     /// }
     /// ```
     pub async fn kill(&mut self) -> io::Result<()> {
@@ -1184,6 +1257,7 @@ impl Child {
     /// This function is cancel safe.
     ///
     /// ```
+    /// # if cfg!(miri) { return } // No `pidfd_spawnp` in miri.
     /// # #[cfg(not(unix))]fn main(){}
     /// # #[cfg(unix)]
     /// use tokio::io::AsyncWriteExt;
@@ -1313,7 +1387,7 @@ impl Child {
 
 /// The standard input stream for spawned children.
 ///
-/// This type implements the `AsyncWrite` trait to pass data to the stdin handle of
+/// This type implements the `AsyncWrite` trait to pass data to the stdin
 /// handle of a child process asynchronously.
 #[derive(Debug)]
 pub struct ChildStdin {
